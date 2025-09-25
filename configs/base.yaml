@@ -1,0 +1,12 @@
+seed: 42
+data_dir: data
+processed_dir: data/processed
+raw_dir: data/raw
+tour: both  # 'atp' | 'wta' | 'both'
+include_market_features: false  # can toggle true later
+exclude_retirements: true
+surface_list: ["Hard", "Clay", "Grass"]
+indoor_flag: true
+calibrator: "auto"  # "auto" chooses isotonic vs platt by validation
+
+

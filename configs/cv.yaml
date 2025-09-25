@@ -1,0 +1,6 @@
+cv:
+  freq: "W"            # weekly walk-forward
+  train_min_weeks: 52  # minimal history
+  valid_weeks: 4
+  test_weeks: 4
+  n_folds: 4

@@ -1,0 +1,13 @@
+models:
+  elo:
+    k_base: 32.0
+    surface_offset: 40.0
+    decay_half_life_days: 365
+  gbdt:
+    max_rounds: 300
+    early_stopping_rounds: 30
+    learning_rate: 0.05
+    num_leaves: 64
+    feature_fraction: 0.8
+    bagging_fraction: 0.8
+    bagging_freq: 1

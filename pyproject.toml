@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tennis-oma"
+version = "0.1.0"
+description = "T-OMA: Tennis Outcome Modeling Architect — calibrated pre-match win probabilities with market-aware ensembling"
+readme = "README.md"
+authors = [{name="Afonso + T-OMA"}]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.3",
+    "optuna>=3.6",
+    "typer>=0.12",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.4",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+    "matplotlib>=3.9",
+    "scipy>=1.13",
+    "statsmodels>=0.14",
+    "joblib>=1.4",
+    "tqdm>=4.66",
+    "shap>=0.46",
+    "streamlit>=1.37"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.2", "ruff>=0.5", "mypy>=1.11", "types-PyYAML"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["tennis*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+strict = false
