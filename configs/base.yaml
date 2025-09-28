@@ -9,4 +9,10 @@ surface_list: ["Hard", "Clay", "Grass"]
 indoor_flag: true
 calibrator: "auto"  # "auto" chooses isotonic vs platt by validation
 
+sources:
+  sackmann_atp: external/tennis_atp
+  sackmann_wta: external/tennis_wta
+  tml_db: external/TML-Database
+  tcb: external/tennis-crystal-ball
 
+use_markets_as_features: false

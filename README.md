@@ -8,7 +8,7 @@ Targets Python **3.12.11**.
 ```bash
 # 1) Create & activate env (example with uv or venv)
 uv venv -p 3.12.11 .venv
-.venv/bin/activate
+.venv\Scripts\activate
 uv pip install -e .
 
 # If you prefer pip:
