@@ -3,9 +3,21 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from pathlib import Path
+from datetime import datetime
+import json
+from .metrics import log_loss, brier, ece
 from typing import List, Tuple, Dict, Any
 
 import lightgbm as lgb
+
+def _df_as_text(df):
+    """Prefer markdown if available, otherwise CSV text."""
+    try:
+        # pandas requires optional 'tabulate' for to_markdown
+        return df.to_markdown(index=False)
+    except Exception:
+        # Fallback that works everywhere
+        return df.to_csv(index=False)
 
 
 def _pick_features(df: pd.DataFrame):
@@ -83,6 +95,10 @@ def _train_lgbm(X_tr, y_tr, X_va, y_va) -> Tuple[lgb.Booster, np.ndarray]:
         bagging_freq=1,
         verbose=-1,
         seed=42,
+        feature_fraction_seed=42,
+        bagging_seed=42,
+        deterministic=True,
+        force_row_wise=True,
     )
     booster = lgb.train(
         params,
@@ -95,34 +111,89 @@ def _train_lgbm(X_tr, y_tr, X_va, y_va) -> Tuple[lgb.Booster, np.ndarray]:
     return booster, preds
 
 
+
 def _train_elo_like(df_tr: pd.DataFrame, df_va: pd.DataFrame) -> np.ndarray:
     """
-    Very simple Elo probability based on precomputed elo features if present.
-    If you have an elo_diff feature, convert to prob via logistic; otherwise fallback to 0.5.
+    Make a very simple Elo-based predictor actually predictive.
+
+    Priority:
+      1) If 'elo_exp_a' (expected win prob for player_a) exists, use it and
+         optionally calibrate with a 2-parameter sigmoid on the train split.
+      2) Else, if we can form 'elo_diff' = rating_a - rating_b from available
+         Elo columns, fit a 1-parameter scale and use sigmoid(scale * diff).
+      3) Else, fallback to 0.5.
     """
-    if "elo_diff" in df_tr.columns:
-        # Fit a one-parameter scale by simple calibration (logistic regression with fixed intercept=0)
-        # prob = 1 / (1 + exp(-scale * elo_diff))
-        # Solve scale with a quick line-search; keep it simple and robust.
+    import numpy as np
 
-        def sigmoid(z): return 1.0 / (1.0 + np.exp(-z))
+    def sigmoid(z):
+        return 1.0 / (1.0 + np.exp(-z))
 
-        X = df_tr["elo_diff"].to_numpy()
-        y = df_tr["y"].to_numpy()
-        scales = np.linspace(0.01, 0.06, 50)
-        best_scale, best_ll = 0.03, 1e9
-        for s in scales:
-            p = sigmoid(s * X).clip(1e-6, 1 - 1e-6)
-            ll = -(y * np.log(p) + (1 - y) * np.log(1 - p)).mean()
-            if ll < best_ll:
-                best_ll, best_scale = ll, s
+    y_tr = df_tr["target"].to_numpy(dtype=float)
+
+    # -------- Path A: use precomputed expected probability if present --------
+    if "elo_exp_a" in df_tr.columns:
+        p_raw_tr = np.clip(df_tr["elo_exp_a"].to_numpy(dtype=float), 1e-6, 1 - 1e-6)
+
+        # Optional light calibration: logit(p_cal) = a*logit(p_raw) + b
+        # Solve (a, b) with a couple of Newton steps to minimize log loss.
+        # Keeps dependencies minimal and is robust.
+        logit = lambda q: np.log(q) - np.log1p(-q)
+        x = logit(p_raw_tr)
+        a, b = 1.0, 0.0  # start close to identity
+
+        for _ in range(5):  # a few iterations are enough
+            z = a * x + b
+            p = sigmoid(z)
+            # Gradient
+            grad_a = np.sum((p - y_tr) * x)
+            grad_b = np.sum(p - y_tr)
+            # Hessian (diagonal approx)
+            w = p * (1 - p)
+            h_aa = np.sum(w * x * x)
+            h_bb = np.sum(w)
+            h_ab = np.sum(w * x)
+            # 2x2 solve (regularize a hair to avoid singularity)
+            H = np.array([[h_aa + 1e-9, h_ab],
+                          [h_ab,         h_bb + 1e-9]])
+            g = np.array([grad_a, grad_b])
+            try:
+                da, db = np.linalg.solve(H, g)
+                a -= da
+                b -= db
+            except np.linalg.LinAlgError:
+                break
+
         # Predict on validation
-        Xv = df_va.get("elo_diff")
-        if Xv is None:
-            return np.full(len(df_va), 0.5, dtype=float)
-        return sigmoid(best_scale * Xv.to_numpy()).clip(1e-6, 1 - 1e-6)
-    else:
-        return np.full(len(df_va), 0.5, dtype=float)
+        p_raw_va = np.clip(df_va.get("elo_exp_a", pd.Series(0.5, index=df_va.index)).to_numpy(dtype=float),
+                           1e-6, 1 - 1e-6)
+        p_cal = sigmoid(a * logit(p_raw_va) + b)
+        return np.clip(p_cal, 1e-6, 1 - 1e-6)
+
+    # -------- Path B: construct elo_diff and fit a scale --------
+    # Try common rating column pairs in priority order
+    rating_pairs = [
+        ("elo_a_surface", "elo_b_surface"),
+        ("elo_a", "elo_b"),
+    ]
+    for ra, rb in rating_pairs:
+        if ra in df_tr.columns and rb in df_tr.columns and ra in df_va.columns and rb in df_va.columns:
+            diff_tr = (df_tr[ra].to_numpy(dtype=float) - df_tr[rb].to_numpy(dtype=float))
+            # Line-search a single scale to minimize log loss
+            scales = np.linspace(0.005, 0.08, 60)
+            best_scale, best_ll = 0.03, np.inf
+            for s in scales:
+                p = np.clip(sigmoid(s * diff_tr), 1e-6, 1 - 1e-6)
+                ll = -np.mean(y_tr * np.log(p) + (1 - y_tr) * np.log(1 - p))
+                if ll < best_ll:
+                    best_ll, best_scale = ll, s
+            # Predict on validation
+            diff_va = (df_va[ra].to_numpy(dtype=float) - df_va[rb].to_numpy(dtype=float))
+            p_va = np.clip(sigmoid(best_scale * diff_va), 1e-6, 1 - 1e-6)
+            return p_va
+
+    # -------- Path C: last resort --------
+    return np.full(len(df_va), 0.5, dtype=float)
+
 
 
 def walk_forward(
@@ -202,6 +273,22 @@ def walk_forward(
             })
             oof_rows.append(oof_chunk)
 
+        fold_metrics_rows = []
+        for model_name, preds in fold_preds.items():
+            yv = y_va.to_numpy()
+            pv = np.clip(preds, 1e-6, 1 - 1e-6)
+            fold_metrics_rows.append({
+                "fold": fold_name,
+                "model": model_name,
+                "n": int(len(yv)),
+                "log_loss": float(log_loss(yv, pv)),
+                "brier": float(brier(yv, pv)),
+                "ece": float(ece(yv, pv)),
+            })
+
+        # keep a running list for all folds
+        rows_summary.extend(fold_metrics_rows)
+
         # Simple per-fold metric for logging
         def logloss(y, p):
             p = np.clip(p, 1e-6, 1 - 1e-6)
@@ -229,8 +316,84 @@ def walk_forward(
     summary = pd.DataFrame(rows_summary)
     summary.to_csv(save_dir / "backtest_results.csv", index=False)
 
+    # 1) Save fold-level metrics table
+    metrics_dir = Path("data/processed")
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    fold_metrics_df = pd.DataFrame(rows_summary)
+    fold_metrics_path = metrics_dir / "metrics_folds.csv"
+    if not fold_metrics_df.empty:
+        fold_metrics_df.to_csv(fold_metrics_path, index=False)
+
+    print(f"[fold={fold_name}] " + " | ".join(
+        f"{r['model']}: LL={r['log_loss']:.3f}, Br={r['brier']:.3f}, ECE={r['ece']:.3f}"
+        for r in fold_metrics_rows
+    ))
+
+    # 2) Build overall per-model metrics from the long OOF (one row per model)
+    # Expect columns: ["date","match_id","y_true","p","model","fold"]
+    oof_long = pd.read_csv(metrics_dir / "oof_valid.csv", parse_dates=["date"])
+    overall_rows = []
+    for model_name, g in oof_long.groupby("model"):
+        yv = g["y_true"].to_numpy()
+        pv = np.clip(g["p"].to_numpy(), 1e-6, 1 - 1e-6)
+        overall_rows.append({
+            "model": model_name,
+            "n": int(len(g)),
+            "log_loss": float(log_loss(yv, pv)),
+            "brier": float(brier(yv, pv)),
+            "ece": float(ece(yv, pv)),
+        })
+    overall_df = pd.DataFrame(overall_rows)
+    overall_path = metrics_dir / "metrics_overall.csv"
+    if not overall_df.empty:
+        overall_df.to_csv(overall_path, index=False)
+
+    # 3) (Optional) also compute an unweighted-mean ensemble metric
+    # Pivot to wide by match_id so we ensemble per match across models.
+    wide = (
+        oof_long
+        .pivot_table(index=["date","match_id","y_true"], columns="model", values="p", aggfunc="first")
+        .reset_index()
+    )
+    pcols = [c for c in wide.columns if c not in ("date","match_id","y_true")]
+    if pcols:
+        ensemble_p = wide[pcols].mean(axis=1).clip(1e-6, 1-1e-6).to_numpy()
+        ensemble_y = wide["y_true"].to_numpy()
+        overall_rows.append({
+            "model": "mean_ensemble",
+            "n": int(len(wide)),
+            "log_loss": float(log_loss(ensemble_y, ensemble_p)),
+            "brier": float(brier(ensemble_y, ensemble_p)),
+            "ece": float(ece(ensemble_y, ensemble_p)),
+        })
+        overall_df = pd.DataFrame(overall_rows)
+        overall_df.to_csv(overall_path, index=False)
+
+    # 4) Append a tiny devlog so you can eyeball runs over time
+    devlog = metrics_dir / "devlog.md"
+    stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    overall_md = _df_as_text(overall_df.sort_values("log_loss")) if not overall_df.empty else "_no metrics_"
+    fold_md = _df_as_text(fold_metrics_df.head(10)) if not fold_metrics_df.empty else "_no fold metrics_"
+
+    devlog_lines = [
+        f"## Backtest @ {stamp}",
+        f"- folds: {folds}",
+        f"- models: {', '.join(models)}",
+        "",
+        "### Overall metrics",
+        overall_md,
+        "",
+        "### Per-fold metrics (first 10 shown)",
+        fold_md,
+        "",
+    ]
+    with devlog.open("a", encoding="utf-8") as f:
+        f.write("\n".join(devlog_lines) + "\n\n")
+
     return {
         "oof_path": str(save_dir / "oof_valid.csv"),
         "summary_path": str(save_dir / "backtest_results.csv"),
         "folds": len(val_year_windows),
     }
+
+

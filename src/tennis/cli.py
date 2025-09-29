@@ -116,65 +116,86 @@ def stack(since: str = "2018-01-01", use_market: bool = False):
 @app.command()
 def evaluate(since: str = "2018-01-01"):
     import pandas as pd
+    from pathlib import Path
+    from datetime import datetime, timezone
     from .eval.metrics import log_loss, brier, ece
 
-    oof = pd.read_csv("data/processed/oof_valid.csv", parse_dates=["date"])
-    oof = oof[oof["date"] >= pd.to_datetime(since)].copy()
+    def _df_as_text(df):
+        try:
+            return df.to_markdown(index=False)
+        except Exception:
+            return df.to_csv(index=False)
 
-    if {"model", "p", "y_true"}.issubset(oof.columns):
-        # --- LONG → WIDE ---
-        # pivot probs to p_{model} columns
-        wide = (
-            oof.pivot_table(
-                index=["date", "match_id"],
-                columns="model",
-                values="p",
-                aggfunc="mean",
-            )
-            .reset_index()
-        )
-        # rename model columns to p_{model}
-        wide.columns = ["date", "match_id"] + [f"p_{c}" for c in wide.columns[2:]]
+    proc = Path("data/processed")
+    oof = pd.read_csv(proc / "oof_valid.csv", parse_dates=["date"])
+    oof = oof[oof["date"] >= pd.to_datetime(since)]
 
-        # optional market column (if present in long oof)
-        if "market_prob_a" in oof.columns:
-            mkt = (
-                oof.groupby(["date", "match_id"], as_index=False)["market_prob_a"]
-                   .mean()
-            )
-            wide = wide.merge(mkt, on=["date", "match_id"], how="left")
+    # --- Per-model metrics on the LONG oof (date, match_id, y_true, p, model, fold) ---
+    long_rows = []
+    for model_name, g in oof.groupby("model"):
+        yv = g["y_true"].to_numpy()
+        pv = g["p"].clip(1e-6, 1-1e-6).to_numpy()
+        long_rows.append({
+            "view": "long",
+            "model": model_name,
+            "n": int(len(g)),
+            "log_loss": float(log_loss(yv, pv)),
+            "brier": float(brier(yv, pv)),
+            "ece": float(ece(yv, pv)),
+        })
+    long_df = pd.DataFrame(long_rows)
 
-        # build y from y_true
-        y_map = (
-            oof.groupby(["date", "match_id"])["y_true"]
-               .mean().round().astype(int)
-        )
-        y = y_map.reindex(wide.set_index(["date", "match_id"]).index).to_numpy()
+    # --- Try to build a WIDE view and compute mean-ensemble + per-model again (sanity) ---
+    wide = (
+        oof
+        .pivot_table(index=["date","match_id","y_true"], columns="model", values="p", aggfunc="first")
+        .reset_index()
+    )
+    pcols = [c for c in wide.columns if c not in ("date","match_id","y_true")]
+    wide_rows = []
+    if pcols:
+        # per-model (wide)
+        for c in pcols:
+            yv = wide["y_true"].to_numpy()
+            pv = wide[c].clip(1e-6, 1-1e-6).to_numpy()
+            wide_rows.append({
+                "view": "wide",
+                "model": c,
+                "n": int(len(wide)),
+                "log_loss": float(log_loss(yv, pv)),
+                "brier": float(brier(yv, pv)),
+                "ece": float(ece(yv, pv)),
+            })
+        # mean ensemble
+        ens = wide[pcols].mean(axis=1).clip(1e-6, 1-1e-6).to_numpy()
+        yv = wide["y_true"].to_numpy()
+        wide_rows.append({
+            "view": "wide",
+            "model": "mean_ensemble",
+            "n": int(len(wide)),
+            "log_loss": float(log_loss(yv, ens)),
+            "brier": float(brier(yv, ens)),
+            "ece": float(ece(yv, ens)),
+        })
+    wide_df = pd.DataFrame(wide_rows)
 
-        pcols = [c for c in wide.columns if c.startswith("p_")]
-        if not pcols:
-            raise SystemExit("No model probability columns found after pivot.")
-        p = wide[pcols].mean(axis=1).clip(1e-6, 1-1e-6).to_numpy()
+    # --- Join + print a concise summary ---
+    metrics = pd.concat([long_df, wide_df], ignore_index=True) if not long_df.empty else wide_df
+    metrics_path = proc / "metrics_eval_since.csv"
+    if not metrics.empty:
+        metrics.to_csv(metrics_path, index=False)
+        print(metrics.sort_values(["view","log_loss"]))
 
-    else:
-        # --- WIDE (legacy) ---
-        pcols = [c for c in oof.columns if c.startswith("p_")]
-        if not pcols:
-            raise SystemExit("OOF has neither long (model/p) nor wide (p_*) format.")
-        p = oof[pcols].mean(axis=1).clip(1e-6, 1-1e-6).to_numpy()
-        y_col = "target" if "target" in oof.columns else (
-            "y_true" if "y_true" in oof.columns else None
-        )
-        if y_col is None:
-            raise SystemExit("Could not find target/y_true column in wide OOF.")
-        y = oof[y_col].to_numpy()
+    # --- Append to devlog ---
+    devlog = proc / "devlog.md"
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    with devlog.open("a", encoding="utf-8") as f:
+        f.write(f"## Evaluate @ {stamp} (since {since})\n\n")
+        if not metrics.empty:
+            f.write(_df_as_text(metrics.sort_values(["view","log_loss"])) + "\n\n")
+        else:
+            f.write("_no metrics_\n\n")
 
-    print({
-        "n": int(len(y)),
-        "log_loss": float(log_loss(y, p)),
-        "brier": float(brier(y, p)),
-        "ece": float(ece(y, p)),
-    })
 
 
 @app.command()

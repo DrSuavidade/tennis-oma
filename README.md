@@ -16,10 +16,12 @@ uv pip install -e .
 # pip install -e .
 
 # 2) Run basic pipeline on synthetic data
-python -m tennis.cli build-features --asof 2018-01-01
+python -m tennis.cli ingest
+python -m tennis.cli freeze --asof 2017-12-31 
+python -m tennis.cli build-features --asof 2017-12-31
 python -m tennis.cli train --folds 3 --models elo,gbdt --tour both
-python -m tennis.cli stack --since 2018-01-01 --use-market no
-python -m tennis.cli evaluate --since 2018-01-01
+python -m tennis.cli stack --since 2016-01-01
+python -m tennis.cli evaluate --since 2016-01-01
 
 # 3) Launch UI
 streamlit run app/streamlit_app.py

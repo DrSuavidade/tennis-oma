@@ -163,6 +163,25 @@ def add_boxscore_lagged_features(df: pd.DataFrame, window_matches: int = 10, min
 
 
 def finalize_features(df: pd.DataFrame) -> pd.DataFrame:
+    # --- Elo helpers (ADD THIS BLOCK) ---
+    # elo_diff: surface-adjusted Elo difference (A - B), fallback from elo_exp_a if needed
+    if "elo_a_surface" in df.columns and "elo_b_surface" in df.columns:
+        df["elo_diff"] = (df["elo_a_surface"] - df["elo_b_surface"]).astype(float)
+    else:
+        # recover a pseudo-diff from prob if only prob exists
+        if "elo_exp_a" in df.columns:
+            p_clip = df["elo_exp_a"].clip(1e-6, 1-1e-6).astype(float)
+            df["elo_diff"] = np.log(p_clip / (1.0 - p_clip))
+        else:
+            df["elo_diff"] = 0.0
+
+    # optional: keep a logit of the Elo win prob for tree models
+    if "elo_exp_a" in df.columns:
+        p_clip = df["elo_exp_a"].clip(1e-6, 1-1e-6).astype(float)
+        df["elo_logit"] = np.log(p_clip / (1.0 - p_clip))
+    else:
+        df["elo_logit"] = 0.0
+    # --- end Elo helpers ---
     feat_cols = [
         # ratings
         "elo_a_surface", "elo_b_surface", "elo_exp_a",

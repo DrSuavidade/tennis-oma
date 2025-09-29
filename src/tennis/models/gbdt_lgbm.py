@@ -22,7 +22,12 @@ class LGBMModel:
             metric="binary_logloss",
             verbose=-1,
             force_row_wise=True,
+            seed=42,
+            feature_fraction_seed=42,
+            bagging_seed=42,
+            deterministic=True,
         )
+
         self.max_rounds = max_rounds
         self.early_stopping_rounds = early_stopping_rounds
         self.model = None
